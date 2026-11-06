@@ -1,0 +1,503 @@
+// Esquema de base de datos — PostgreSQL + Prisma 7 (ADR 0001).
+// Reglas:
+// - Toda tabla de dominio lleva local_id. Cada tabla tiene @@unique([localId, id]) y las
+//   relaciones van con FK compuestas (local_id, x_id) → (local_id, id): la base impide mezclar
+//   datos de dos locales.
+// - Montos en Decimal(14,2); en el dominio y en la API, centavos enteros (src/common/money).
+// - Las restricciones que Prisma no expresa (CHECK y triggers) están en el SQL de la migración
+//   y se indican con un comentario "SQL:" en el modelo.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "cjs"
+  importFileExtension = ""
+  previewFeatures     = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Local (raíz del tenant, ADR 0002) ──────────────────────────────────────
+
+enum EstadoLocal {
+  ACTIVO
+  SUSPENDIDO
+}
+
+model Local {
+  id            String      @id @default(uuid(7)) @db.Uuid
+  nombre        String      @db.VarChar(80)
+  estado        EstadoLocal @default(ACTIVO)
+  zonaHoraria   String      @default("America/Argentina/Buenos_Aires") @map("zona_horaria") @db.VarChar(64)
+  creadoEn      DateTime    @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime    @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  configuracion  ConfiguracionLocal?
+  usuarios       Usuario[]
+  categorias     Categoria[]
+  productos      Producto[]
+  gruposOpciones GrupoOpciones[]
+  opciones       OpcionProducto[]
+  mesas          Mesa[]
+  sesiones       SesionMesa[]
+  pedidos        Pedido[]
+  pedidoItems    PedidoItem[]
+  itemOpciones   PedidoItemOpcion[]
+  llamados       Llamado[]
+  turnos         TurnoCaja[]
+  pagos          Pago[]
+
+  @@map("locales")
+}
+
+/// Configuración de la etapa 1. SQL: CHECK umbral > 0; CHECK pausado ⇒ pausado_por y pausado_en.
+model ConfiguracionLocal {
+  localId             String    @id @map("local_id") @db.Uuid
+  /// Hora pico: todos los pedidos por QR entran "a confirmar", no solo el primero.
+  aprobacionHoraPico  Boolean   @default(false) @map("aprobacion_hora_pico")
+  /// Segundos sin señal de vida de la barra para pasar a modo consulta.
+  umbralSenalBarraSeg Int       @default(30) @map("umbral_senal_barra_seg")
+  /// Pausa manual de los pedidos por QR (dueño o encargado).
+  pedidosQrPausados   Boolean   @default(false) @map("pedidos_qr_pausados")
+  pausadoPorId        String?   @map("pausado_por_id") @db.Uuid
+  pausadoEn           DateTime? @map("pausado_en") @db.Timestamptz(3)
+  actualizadoEn       DateTime  @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local      Local    @relation(fields: [localId], references: [id], onDelete: Cascade)
+  pausadoPor Usuario? @relation("ConfiguracionPausadaPor", fields: [localId, pausadoPorId], references: [localId, id], onDelete: Restrict)
+
+  @@map("configuracion_local")
+}
+
+// ─── Personal ───────────────────────────────────────────────────────────────
+
+enum EstadoUsuario {
+  ACTIVO
+  INACTIVO
+}
+
+/// Identidad del personal. Roles, permisos y sesiones de login llegan con la tarea de auth.
+model Usuario {
+  id            String        @id @default(uuid(7)) @db.Uuid
+  localId       String        @map("local_id") @db.Uuid
+  /// Único global y en minúsculas (como Kiosco): el login no pide el local.
+  email         String        @unique @db.VarChar(254)
+  passwordHash  String        @map("password_hash") @db.VarChar(255)
+  nombre        String        @db.VarChar(80)
+  apellido      String        @db.VarChar(80)
+  estado        EstadoUsuario @default(ACTIVO)
+  creadoEn      DateTime      @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime      @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local Local @relation(fields: [localId], references: [id], onDelete: Cascade)
+
+  configuracionesPausadas ConfiguracionLocal[] @relation("ConfiguracionPausadaPor")
+  sesionesAbiertas        SesionMesa[]         @relation("SesionAbiertaPor")
+  sesionesCerradas        SesionMesa[]         @relation("SesionCerradaPor")
+  pedidosCargados         Pedido[]             @relation("PedidoCargadoPor")
+  pedidosConfirmados      Pedido[]             @relation("PedidoConfirmadoPor")
+  pedidosAnulados         Pedido[]             @relation("PedidoAnuladoPor")
+  itemsAnulados           PedidoItem[]         @relation("ItemAnuladoPor")
+  llamadosAtendidos       Llamado[]            @relation("LlamadoAtendidoPor")
+  turnosAbiertos          TurnoCaja[]          @relation("TurnoAbiertoPor")
+  turnosCerrados          TurnoCaja[]          @relation("TurnoCerradoPor")
+  pagosRegistrados        Pago[]               @relation("PagoRegistradoPor")
+  pagosCargados           Pago[]               @relation("PagoCargadoPor")
+
+  @@unique([localId, id])
+  @@index([localId, estado])
+  @@map("usuarios")
+}
+
+// ─── Carta ──────────────────────────────────────────────────────────────────
+
+model Categoria {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  localId       String   @map("local_id") @db.Uuid
+  nombre        String   @db.VarChar(60)
+  orden         Int      @default(0)
+  activa        Boolean  @default(true)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local     Local      @relation(fields: [localId], references: [id], onDelete: Cascade)
+  productos Producto[]
+
+  @@unique([localId, id])
+  @@unique([localId, nombre])
+  @@map("categorias")
+}
+
+/// SQL: CHECK precio ≥ 0.
+model Producto {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  localId       String   @map("local_id") @db.Uuid
+  categoriaId   String   @map("categoria_id") @db.Uuid
+  nombre        String   @db.VarChar(80)
+  descripcion   String?  @db.VarChar(500)
+  precio        Decimal  @db.Decimal(14, 2)
+  fotoUrl       String?  @map("foto_url") @db.VarChar(500)
+  /// Botón de agotado: se ve gris y no se puede pedir (ADR 0005).
+  disponible    Boolean  @default(true)
+  /// Baja lógica: no aparece en la carta. Los pedidos viejos lo siguen referenciando.
+  activo        Boolean  @default(true)
+  orden         Int      @default(0)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local          Local           @relation(fields: [localId], references: [id], onDelete: Cascade)
+  categoria      Categoria       @relation(fields: [localId, categoriaId], references: [localId, id], onDelete: Restrict)
+  gruposOpciones GrupoOpciones[]
+  pedidoItems    PedidoItem[]
+
+  @@unique([localId, id])
+  @@index([localId, categoriaId, orden])
+  @@map("productos")
+}
+
+/// Grupo de opciones de un producto ("Tamaño", "Tipo de leche"). SQL: CHECK 0 ≤ min ≤ max, max ≥ 1.
+model GrupoOpciones {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  localId       String   @map("local_id") @db.Uuid
+  productoId    String   @map("producto_id") @db.Uuid
+  nombre        String   @db.VarChar(60)
+  minElegidas   Int      @default(0) @map("min_elegidas")
+  maxElegidas   Int      @default(1) @map("max_elegidas")
+  /// Baja lógica: no aparece en la carta. Los pedidos viejos siguen referenciando sus opciones.
+  activo        Boolean  @default(true)
+  orden         Int      @default(0)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local    Local            @relation(fields: [localId], references: [id], onDelete: Cascade)
+  producto Producto         @relation(fields: [localId, productoId], references: [localId, id], onDelete: Restrict)
+  opciones OpcionProducto[]
+
+  @@unique([localId, id])
+  @@index([localId, productoId])
+  @@map("grupos_opciones")
+}
+
+/// SQL: CHECK recargo ≥ 0.
+model OpcionProducto {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  localId       String   @map("local_id") @db.Uuid
+  grupoId       String   @map("grupo_id") @db.Uuid
+  nombre        String   @db.VarChar(60)
+  recargo       Decimal  @default(0) @db.Decimal(14, 2)
+  /// Agotada: se ve gris y no se puede elegir (ADR 0005).
+  disponible    Boolean  @default(true)
+  /// Baja lógica (como productos.activo): no aparece en la carta.
+  activo        Boolean  @default(true)
+  orden         Int      @default(0)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local         Local              @relation(fields: [localId], references: [id], onDelete: Cascade)
+  grupo         GrupoOpciones      @relation(fields: [localId, grupoId], references: [localId, id], onDelete: Restrict)
+  itemsElegidos PedidoItemOpcion[]
+
+  @@unique([localId, id])
+  @@index([localId, grupoId])
+  @@map("opciones_producto")
+}
+
+// ─── Salón ──────────────────────────────────────────────────────────────────
+
+enum FormaMesa {
+  REDONDA
+  CUADRADA
+  LARGA
+}
+
+/// SQL: CHECK numero > 0, sillas ≥ 0.
+model Mesa {
+  id                 String    @id @default(uuid(7)) @db.Uuid
+  localId            String    @map("local_id") @db.Uuid
+  numero             Int
+  /// Código aleatorio del QR (nunca el número de mesa), regenerable. Único GLOBAL: la URL
+  /// /m/<código> no lleva el local y es la única búsqueda que no filtra por local_id.
+  codigoQr           String    @unique @map("codigo_qr") @db.VarChar(16)
+  codigoQrGeneradoEn DateTime  @default(now()) @map("codigo_qr_generado_en") @db.Timestamptz(3)
+  sector             String?   @db.VarChar(40)
+  forma              FormaMesa @default(CUADRADA)
+  sillas             Int       @default(4)
+  /// Posición en el plano del salón (unidades de la grilla del editor).
+  posX               Int       @default(0) @map("pos_x")
+  posY               Int       @default(0) @map("pos_y")
+  activa             Boolean   @default(true)
+  creadoEn           DateTime  @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn      DateTime  @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local    Local        @relation(fields: [localId], references: [id], onDelete: Cascade)
+  sesiones SesionMesa[]
+
+  @@unique([localId, id])
+  @@unique([localId, numero])
+  @@map("mesas")
+}
+
+enum EstadoSesionMesa {
+  ABIERTA
+  CUENTA_PEDIDA
+  CERRADA
+}
+
+/// Sesión compartida por los celulares de una mesa. mesa_id nulo = mostrador o venta del
+/// corte sin mesa (ADR 0005). SQL: CHECK (estado = CERRADA) ⇔ cerrada_en no nulo.
+model SesionMesa {
+  id           String           @id @default(uuid(7)) @db.Uuid
+  localId      String           @map("local_id") @db.Uuid
+  mesaId       String?          @map("mesa_id") @db.Uuid
+  estado       EstadoSesionMesa @default(ABIERTA)
+  abiertaEn    DateTime         @default(now()) @map("abierta_en") @db.Timestamptz(3)
+  /// Nulo = la abrió el primer escaneo del QR.
+  abiertaPorId String?          @map("abierta_por_id") @db.Uuid
+  cerradaEn    DateTime?        @map("cerrada_en") @db.Timestamptz(3)
+  cerradaPorId String?          @map("cerrada_por_id") @db.Uuid
+
+  local      Local     @relation(fields: [localId], references: [id], onDelete: Cascade)
+  mesa       Mesa?     @relation(fields: [localId, mesaId], references: [localId, id], onDelete: Restrict)
+  abiertaPor Usuario?  @relation("SesionAbiertaPor", fields: [localId, abiertaPorId], references: [localId, id], onDelete: Restrict)
+  cerradaPor Usuario?  @relation("SesionCerradaPor", fields: [localId, cerradaPorId], references: [localId, id], onDelete: Restrict)
+  pedidos    Pedido[]
+  llamados   Llamado[]
+  pagos      Pago[]
+
+  @@unique([localId, id])
+  /// Una sola sesión abierta por mesa ("cuenta pedida" también cuenta como abierta).
+  @@unique([localId, mesaId], map: "sesiones_mesa_una_abierta_por_mesa", where: raw("estado <> 'CERRADA' AND mesa_id IS NOT NULL"))
+  @@index([localId, estado])
+  @@map("sesiones_mesa")
+}
+
+// ─── Pedidos ────────────────────────────────────────────────────────────────
+
+enum OrigenPedido {
+  QR
+  MOZO
+  MOSTRADOR
+}
+
+enum EstadoPedido {
+  A_CONFIRMAR
+  CONFIRMADO
+  EN_PREPARACION
+  LISTO
+  ENTREGADO
+  ANULADO
+}
+
+/// SQL: CHECK ANULADO ⇔ anulado_por, anulado_en y motivo; CHECK en_contingencia ⇒ cargado_por
+/// y cargado_en; CHECK origen MOZO ⇒ cargado_por.
+model Pedido {
+  id                String       @id @default(uuid(7)) @db.Uuid
+  localId           String       @map("local_id") @db.Uuid
+  sesionId          String       @map("sesion_id") @db.Uuid
+  origen            OrigenPedido
+  estado            EstadoPedido
+  /// Generada por el celular (o por el panel) en cada envío: el pedido se registra una vez.
+  claveIdempotencia String       @map("clave_idempotencia") @db.Uuid
+  /// Hash del contenido: detecta la misma clave reenviada con otro contenido.
+  huellaSolicitud   String       @map("huella_solicitud") @db.VarChar(64)
+  /// Quién lo cargó en el sistema (mozo, o cajero en la carga del corte). Nulo si vino por QR.
+  cargadoPorId      String?      @map("cargado_por_id") @db.Uuid
+  /// Cuándo se cargó: solo en contingencia difiere de creado_en.
+  cargadoEn         DateTime?    @map("cargado_en") @db.Timestamptz(3)
+  confirmadoPorId   String?      @map("confirmado_por_id") @db.Uuid
+  confirmadoEn      DateTime?    @map("confirmado_en") @db.Timestamptz(3)
+  listoEn           DateTime?    @map("listo_en") @db.Timestamptz(3)
+  entregadoEn       DateTime?    @map("entregado_en") @db.Timestamptz(3)
+  anuladoPorId      String?      @map("anulado_por_id") @db.Uuid
+  anuladoEn         DateTime?    @map("anulado_en") @db.Timestamptz(3)
+  motivoAnulacion   String?      @map("motivo_anulacion") @db.VarChar(200)
+  /// Venta anotada en papel durante un corte y cargada después.
+  enContingencia    Boolean      @default(false) @map("en_contingencia")
+  /// Hora real del pedido (en contingencia la escribe el cajero).
+  creadoEn          DateTime     @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn     DateTime     @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  local         Local        @relation(fields: [localId], references: [id], onDelete: Cascade)
+  sesion        SesionMesa   @relation(fields: [localId, sesionId], references: [localId, id], onDelete: Restrict)
+  cargadoPor    Usuario?     @relation("PedidoCargadoPor", fields: [localId, cargadoPorId], references: [localId, id], onDelete: Restrict)
+  confirmadoPor Usuario?     @relation("PedidoConfirmadoPor", fields: [localId, confirmadoPorId], references: [localId, id], onDelete: Restrict)
+  anuladoPor    Usuario?     @relation("PedidoAnuladoPor", fields: [localId, anuladoPorId], references: [localId, id], onDelete: Restrict)
+  items         PedidoItem[]
+
+  @@unique([localId, id])
+  @@unique([localId, claveIdempotencia])
+  @@index([localId, sesionId])
+  /// Cola de la barra: pedidos activos, los más viejos primero.
+  @@index([localId, estado, creadoEn])
+  @@map("pedidos")
+}
+
+enum EstadoPedidoItem {
+  VIGENTE
+  ANULADO
+}
+
+/// Nombre y precio copiados al pedir. SQL: CHECK cantidad > 0, precio_unitario ≥ 0;
+/// CHECK ANULADO ⇔ anulado_por, anulado_en y motivo.
+model PedidoItem {
+  id              String           @id @default(uuid(7)) @db.Uuid
+  localId         String           @map("local_id") @db.Uuid
+  pedidoId        String           @map("pedido_id") @db.Uuid
+  productoId      String           @map("producto_id") @db.Uuid
+  nombreProducto  String           @map("nombre_producto") @db.VarChar(80)
+  cantidad        Int
+  /// Precio base del producto al pedir (los recargos van en pedido_item_opciones).
+  precioUnitario  Decimal          @map("precio_unitario") @db.Decimal(14, 2)
+  nota            String?          @db.VarChar(200)
+  estado          EstadoPedidoItem @default(VIGENTE)
+  anuladoPorId    String?          @map("anulado_por_id") @db.Uuid
+  anuladoEn       DateTime?        @map("anulado_en") @db.Timestamptz(3)
+  motivoAnulacion String?          @map("motivo_anulacion") @db.VarChar(200)
+  creadoEn        DateTime         @default(now()) @map("creado_en") @db.Timestamptz(3)
+
+  local      Local              @relation(fields: [localId], references: [id], onDelete: Cascade)
+  pedido     Pedido             @relation(fields: [localId, pedidoId], references: [localId, id], onDelete: Restrict)
+  producto   Producto           @relation(fields: [localId, productoId], references: [localId, id], onDelete: Restrict)
+  anuladoPor Usuario?           @relation("ItemAnuladoPor", fields: [localId, anuladoPorId], references: [localId, id], onDelete: Restrict)
+  opciones   PedidoItemOpcion[]
+
+  @@unique([localId, id])
+  @@index([localId, pedidoId])
+  @@map("pedido_items")
+}
+
+/// Opción elegida, con nombres y recargo copiados al pedir. SQL: CHECK recargo ≥ 0.
+model PedidoItemOpcion {
+  id           String  @id @default(uuid(7)) @db.Uuid
+  localId      String  @map("local_id") @db.Uuid
+  pedidoItemId String  @map("pedido_item_id") @db.Uuid
+  opcionId     String  @map("opcion_id") @db.Uuid
+  nombreGrupo  String  @map("nombre_grupo") @db.VarChar(60)
+  nombreOpcion String  @map("nombre_opcion") @db.VarChar(60)
+  recargo      Decimal @db.Decimal(14, 2)
+
+  local      Local          @relation(fields: [localId], references: [id], onDelete: Cascade)
+  pedidoItem PedidoItem     @relation(fields: [localId, pedidoItemId], references: [localId, id], onDelete: Cascade)
+  opcion     OpcionProducto @relation(fields: [localId, opcionId], references: [localId, id], onDelete: Restrict)
+
+  @@unique([localId, id])
+  @@index([localId, pedidoItemId])
+  @@map("pedido_item_opciones")
+}
+
+// ─── Llamados ───────────────────────────────────────────────────────────────
+
+enum TipoLlamado {
+  MOZO
+  CUENTA
+}
+
+enum EstadoLlamado {
+  PENDIENTE
+  ATENDIDO
+}
+
+/// SQL: CHECK ATENDIDO ⇔ atendido_por y atendido_en.
+model Llamado {
+  id            String        @id @default(uuid(7)) @db.Uuid
+  localId       String        @map("local_id") @db.Uuid
+  sesionId      String        @map("sesion_id") @db.Uuid
+  tipo          TipoLlamado
+  estado        EstadoLlamado @default(PENDIENTE)
+  creadoEn      DateTime      @default(now()) @map("creado_en") @db.Timestamptz(3)
+  atendidoPorId String?       @map("atendido_por_id") @db.Uuid
+  atendidoEn    DateTime?     @map("atendido_en") @db.Timestamptz(3)
+
+  local       Local      @relation(fields: [localId], references: [id], onDelete: Cascade)
+  sesion      SesionMesa @relation(fields: [localId, sesionId], references: [localId, id], onDelete: Restrict)
+  atendidoPor Usuario?   @relation("LlamadoAtendidoPor", fields: [localId, atendidoPorId], references: [localId, id], onDelete: Restrict)
+
+  @@unique([localId, id])
+  /// Un solo llamado pendiente por sesión y tipo: repetirlo devuelve el mismo (ADR 0005).
+  @@unique([localId, sesionId, tipo], map: "llamados_uno_pendiente_por_tipo", where: raw("estado = 'PENDIENTE'"))
+  @@index([localId, estado, creadoEn])
+  @@map("llamados")
+}
+
+// ─── Caja ───────────────────────────────────────────────────────────────────
+
+enum EstadoTurnoCaja {
+  ABIERTO
+  CERRADO
+}
+
+/// SQL: CHECK CERRADO ⇔ cerrado_por, cerrado_en, efectivo esperado, declarado y diferencia;
+/// CHECK diferencia = declarado − esperado.
+model TurnoCaja {
+  id                String          @id @default(uuid(7)) @db.Uuid
+  localId           String          @map("local_id") @db.Uuid
+  estado            EstadoTurnoCaja @default(ABIERTO)
+  abiertoPorId      String          @map("abierto_por_id") @db.Uuid
+  abiertoEn         DateTime        @default(now()) @map("abierto_en") @db.Timestamptz(3)
+  cerradoPorId      String?         @map("cerrado_por_id") @db.Uuid
+  cerradoEn         DateTime?       @map("cerrado_en") @db.Timestamptz(3)
+  /// Efectivo según lo registrado (arqueo).
+  efectivoEsperado  Decimal?        @map("efectivo_esperado") @db.Decimal(14, 2)
+  /// Efectivo contado por el cajero al cerrar.
+  efectivoDeclarado Decimal?        @map("efectivo_declarado") @db.Decimal(14, 2)
+  /// Declarado − esperado (negativo = faltante).
+  diferencia        Decimal?        @db.Decimal(14, 2)
+  notas             String?         @db.VarChar(500)
+
+  local      Local    @relation(fields: [localId], references: [id], onDelete: Cascade)
+  abiertoPor Usuario  @relation("TurnoAbiertoPor", fields: [localId, abiertoPorId], references: [localId, id], onDelete: Restrict)
+  cerradoPor Usuario? @relation("TurnoCerradoPor", fields: [localId, cerradoPorId], references: [localId, id], onDelete: Restrict)
+  pagos      Pago[]
+
+  @@unique([localId, id])
+  /// Un solo turno abierto por local en la etapa 1.
+  @@unique([localId], map: "turnos_caja_uno_abierto_por_local", where: raw("estado = 'ABIERTO'"))
+  @@index([localId, abiertoEn])
+  @@map("turnos_caja")
+}
+
+enum MedioPago {
+  EFECTIVO
+  MERCADO_PAGO
+  DEBITO
+  CREDITO
+}
+
+/// INMUTABLE (ADR 0004): triggers rechazan UPDATE, DELETE y TRUNCATE. Se anula con un contramovimiento
+/// (anula_a_id, monto negativo y motivo). SQL: CHECK pago normal / contramovimiento;
+/// CHECK en_contingencia ⇒ cargado_por y cargado_en.
+model Pago {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  localId         String    @map("local_id") @db.Uuid
+  sesionId        String    @map("sesion_id") @db.Uuid
+  turnoId         String    @map("turno_id") @db.Uuid
+  /// Lo imputado a la cuenta, sin la propina.
+  monto           Decimal   @db.Decimal(14, 2)
+  medio           MedioPago
+  propina         Decimal   @default(0) @db.Decimal(14, 2)
+  registradoPorId String    @map("registrado_por_id") @db.Uuid
+  enContingencia  Boolean   @default(false) @map("en_contingencia")
+  cargadoPorId    String?   @map("cargado_por_id") @db.Uuid
+  cargadoEn       DateTime? @map("cargado_en") @db.Timestamptz(3)
+  /// Pago que este contramovimiento anula. Un pago se anula una sola vez.
+  anulaAId        String?   @map("anula_a_id") @db.Uuid
+  motivoAnulacion String?   @map("motivo_anulacion") @db.VarChar(200)
+  /// Hora real del cobro (en contingencia la escribe el cajero).
+  creadoEn        DateTime  @default(now()) @map("creado_en") @db.Timestamptz(3)
+
+  local         Local      @relation(fields: [localId], references: [id], onDelete: Restrict)
+  sesion        SesionMesa @relation(fields: [localId, sesionId], references: [localId, id], onDelete: Restrict)
+  turno         TurnoCaja  @relation(fields: [localId, turnoId], references: [localId, id], onDelete: Restrict)
+  registradoPor Usuario    @relation("PagoRegistradoPor", fields: [localId, registradoPorId], references: [localId, id], onDelete: Restrict)
+  cargadoPor    Usuario?   @relation("PagoCargadoPor", fields: [localId, cargadoPorId], references: [localId, id], onDelete: Restrict)
+  anulaA        Pago?      @relation("Contramovimiento", fields: [localId, anulaAId], references: [localId, id], onDelete: Restrict)
+  anuladoPor    Pago?      @relation("Contramovimiento")
+
+  @@unique([localId, id])
+  @@unique([localId, anulaAId])
+  @@index([localId, sesionId])
+  @@index([localId, turnoId])
+  @@map("pagos")
+}

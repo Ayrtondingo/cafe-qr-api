@@ -1,0 +1,18 @@
+/**
+ * Códigos de error genéricos. Cada módulo define los suyos (ej. PRODUCTO_AGOTADO) en su
+ * carpeta, con el formato MAYUSCULAS_CON_GUION_BAJO.
+ */
+export const CodigoErrorComun = {
+  SOLICITUD_INVALIDA: 'SOLICITUD_INVALIDA',
+  VALIDACION: 'VALIDACION',
+  NO_AUTENTICADO: 'NO_AUTENTICADO',
+  PROHIBIDO: 'PROHIBIDO',
+  NO_ENCONTRADO: 'NO_ENCONTRADO',
+  CONFLICTO: 'CONFLICTO',
+  CONTENIDO_DEMASIADO_GRANDE: 'CONTENIDO_DEMASIADO_GRANDE',
+  DEMASIADAS_SOLICITUDES: 'DEMASIADAS_SOLICITUDES',
+  ERROR_INTERNO: 'ERROR_INTERNO',
+  SERVICIO_NO_DISPONIBLE: 'SERVICIO_NO_DISPONIBLE',
+} as const;
+
+export type CodigoErrorComun = (typeof CodigoErrorComun)[keyof typeof CodigoErrorComun];
