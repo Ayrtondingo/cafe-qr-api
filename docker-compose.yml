@@ -1,0 +1,42 @@
+name: cafe-qr
+
+# Bases de PostgreSQL para desarrollo y para los tests de integración.
+# El compose completo (api + web + nginx) llega con la tarea de deploy.
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: cafe
+      POSTGRES_PASSWORD: cafe-dev
+      POSTGRES_DB: cafe_qr
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cafe -d cafe_qr']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Base descartable para los tests e2e: vive en memoria y se borra al bajar el contenedor.
+  postgres-test:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: cafe
+      POSTGRES_PASSWORD: cafe-test
+      POSTGRES_DB: cafe_qr_test
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - ./docker/postgres-test-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cafe -d cafe_qr_test']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

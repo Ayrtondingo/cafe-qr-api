@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Cliente Prisma generado (se regenera en npm install)
+src/generated/
+
+# Entorno: NUNCA subir .env reales
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+logs/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
